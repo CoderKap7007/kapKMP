@@ -1,6 +1,6 @@
 workflows:
   ios-simulator-appetize:
-    name: iOS Simulator Build (Appetize)
+    name: KAP iOS Simulator Build (Appetize)
     max_build_duration: 60
     instance_type: mac_mini_m2
     environment:
@@ -9,9 +9,8 @@ workflows:
         # and add APPETIZE_API_TOKEN there (mark it "secure").
         - appetize_credentials
       vars:
-        XCODE_WORKSPACE: "iosApp/iosApp.xcworkspace"   # change if your workspace path differs
-        XCODE_SCHEME: "iosApp"                          # change to your scheme name
-        APP_NAME: "MyKmpApp"                             # used to name the zip
+        XCODE_SCHEME: "KAP"                             # change to your scheme name (see "Available schemes" in build log)
+        APP_NAME: "KAP"                                  # used to name the zip
       xcode: latest
       cocoapods: default
     cache:
@@ -27,6 +26,35 @@ workflows:
             cd iosApp && pod install
           fi
 
+      - name: Locate Xcode project or workspace
+        script: |
+          set -e
+          echo "Repo contents (top 3 levels):"
+          find . -maxdepth 3 \( -name "*.xcworkspace" -o -name "*.xcodeproj" \) ! -path "*/Pods/*" ! -path "*/DerivedData/*"
+
+          WORKSPACE_PATH=$(find . -maxdepth 3 -name "*.xcworkspace" ! -path "*/Pods/*" ! -path "*/DerivedData/*" | head -n 1)
+          if [ -n "$WORKSPACE_PATH" ]; then
+            WORKSPACE_PATH="${WORKSPACE_PATH#./}"
+            echo "Using workspace: $WORKSPACE_PATH"
+            echo "FOUND_XCODE_WORKSPACE=$WORKSPACE_PATH" >> "$CM_ENV"
+          else
+            PROJECT_PATH=$(find . -maxdepth 3 -name "*.xcodeproj" ! -path "*/DerivedData/*" | head -n 1)
+            if [ -z "$PROJECT_PATH" ]; then
+              echo "ERROR: No .xcworkspace or .xcodeproj found in repo. Check your folder structure."
+              exit 1
+            fi
+            PROJECT_PATH="${PROJECT_PATH#./}"
+            echo "No workspace found, using project: $PROJECT_PATH"
+            echo "FOUND_XCODE_PROJECT=$PROJECT_PATH" >> "$CM_ENV"
+          fi
+
+          echo "Available schemes:"
+          if [ -n "$WORKSPACE_PATH" ]; then
+            xcodebuild -list -workspace "$WORKSPACE_PATH" || true
+          else
+            xcodebuild -list -project "$PROJECT_PATH" || true
+          fi
+
       - name: Build iOS app for simulator
         script: |
           set -e -o pipefail
@@ -37,8 +65,18 @@ workflows:
           # xcodebuild below triggers that build phase automatically, with the correct
           # simulator context, so the shared framework gets built as part of this step.
           chmod +x ./gradlew
+
+          if [ -n "$FOUND_XCODE_WORKSPACE" ]; then
+            BUILD_TARGET_FLAG="-workspace"
+            BUILD_TARGET_PATH="$FOUND_XCODE_WORKSPACE"
+          else
+            BUILD_TARGET_FLAG="-project"
+            BUILD_TARGET_PATH="$FOUND_XCODE_PROJECT"
+          fi
+          echo "Building with $BUILD_TARGET_FLAG $BUILD_TARGET_PATH, scheme $XCODE_SCHEME"
+
           xcodebuild build \
-            -workspace "$XCODE_WORKSPACE" \
+            $BUILD_TARGET_FLAG "$BUILD_TARGET_PATH" \
             -scheme "$XCODE_SCHEME" \
             -configuration Debug \
             -sdk iphonesimulator \
