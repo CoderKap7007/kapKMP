@@ -32,7 +32,7 @@ workflows:
           echo "Repo contents (top 3 levels):"
           find . -maxdepth 3 \( -name "*.xcworkspace" -o -name "*.xcodeproj" \) ! -path "*/Pods/*" ! -path "*/DerivedData/*"
 
-          WORKSPACE_PATH=$(find . -maxdepth 3 -name "*.xcworkspace" ! -path "*/Pods/*" ! -path "*/DerivedData/*" | head -n 1)
+          WORKSPACE_PATH=$(find . -maxdepth 3 -name "*.xcworkspace" ! -path "*/Pods/*" ! -path "*/DerivedData/*" ! -path "*.xcodeproj/*" | head -n 1)
           if [ -n "$WORKSPACE_PATH" ]; then
             WORKSPACE_PATH="${WORKSPACE_PATH#./}"
             echo "Using workspace: $WORKSPACE_PATH"
@@ -116,4 +116,5 @@ workflows:
         notify:
           success: true
           failure: true
+
 
