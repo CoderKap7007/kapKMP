@@ -1,120 +1,267 @@
 workflows:
-  ios-simulator-appetize:
-    name: KAP iOS Simulator Build (Appetize)
-    max_build_duration: 60
+  ios-simulator:
+    name: iOS Simulator Build
+    max_build_duration: 120
     instance_type: mac_mini_m2
+
     environment:
-      groups:
-        # Create this group in Codemagic UI (Teams > Group variables)
-        # and add APPETIZE_API_TOKEN there (mark it "secure").
-        - appetize_credentials
-      vars:
-        XCODE_SCHEME: "KAP"                             # change to your scheme name (see "Available schemes" in build log)
-        APP_NAME: "KAP"                                  # used to name the zip
       xcode: latest
-      cocoapods: default
-    cache:
-      cache_paths:
-        - $HOME/.gradle/caches
-        - $HOME/.konan
-        - $HOME/.gradle/wrapper
 
     scripts:
-      - name: Install CocoaPods dependencies (skip if using SPM/direct framework embedding)
-        script: |
-          if [ -f "iosApp/Podfile" ]; then
-            cd iosApp && pod install
-          fi
 
-      - name: Locate Xcode project or workspace
+      # ---------------------------------------------------------
+      # 1. Show repository structure
+      # ---------------------------------------------------------
+      - name: Show project structure
         script: |
           set -e
-          echo "Repo contents (top 3 levels):"
-          find . -maxdepth 3 \( -name "*.xcworkspace" -o -name "*.xcodeproj" \) ! -path "*/Pods/*" ! -path "*/DerivedData/*"
 
-          WORKSPACE_PATH=$(find . -maxdepth 3 -name "*.xcworkspace" ! -path "*/Pods/*" ! -path "*/DerivedData/*" ! -path "*.xcodeproj/*" | head -n 1)
-          if [ -n "$WORKSPACE_PATH" ]; then
-            WORKSPACE_PATH="${WORKSPACE_PATH#./}"
-            echo "Using workspace: $WORKSPACE_PATH"
-            echo "FOUND_XCODE_WORKSPACE=$WORKSPACE_PATH" >> "$CM_ENV"
-          else
-            PROJECT_PATH=$(find . -maxdepth 3 -name "*.xcodeproj" ! -path "*/DerivedData/*" | head -n 1)
-            if [ -z "$PROJECT_PATH" ]; then
-              echo "ERROR: No .xcworkspace or .xcodeproj found in repo. Check your folder structure."
-              exit 1
-            fi
-            PROJECT_PATH="${PROJECT_PATH#./}"
-            echo "No workspace found, using project: $PROJECT_PATH"
-            echo "FOUND_XCODE_PROJECT=$PROJECT_PATH" >> "$CM_ENV"
-          fi
+          echo "=========================================="
+          echo "CODEMAGIC BUILD DIRECTORY"
+          echo "=========================================="
+          echo "$CM_BUILD_DIR"
 
-          echo "Available schemes:"
-          if [ -n "$WORKSPACE_PATH" ]; then
-            xcodebuild -list -workspace "$WORKSPACE_PATH" || true
-          else
-            xcodebuild -list -project "$PROJECT_PATH" || true
-          fi
+          echo ""
+          echo "=========================================="
+          echo "FILES"
+          echo "=========================================="
 
-      - name: Build iOS app for simulator
-        script: |
-          set -e -o pipefail
-          # NOTE: we do NOT call ./gradlew embedAndSignAppleFrameworkForXcode manually here.
-          # That task (and syncComposeResourcesForIos, if you use Compose Multiplatform
-          # resources) requires Xcode-provided env vars (PLATFORM_NAME, ARCHS, SDK_NAME, etc.)
-          # which only exist when Gradle is invoked from Xcode's own "Run Script" build phase.
-          # xcodebuild below triggers that build phase automatically, with the correct
-          # simulator context, so the shared framework gets built as part of this step.
-          chmod +x ./gradlew
+          find "$CM_BUILD_DIR" \
+            -maxdepth 4 \
+            \( -name "*.xcodeproj" -o -name "*.xcworkspace" -o -name "Podfile" -o -name "Package.swift" \) \
+            -print
 
-          if [ -n "$FOUND_XCODE_WORKSPACE" ]; then
-            BUILD_TARGET_FLAG="-workspace"
-            BUILD_TARGET_PATH="$FOUND_XCODE_WORKSPACE"
-          else
-            BUILD_TARGET_FLAG="-project"
-            BUILD_TARGET_PATH="$FOUND_XCODE_PROJECT"
-          fi
-          echo "Building with $BUILD_TARGET_FLAG $BUILD_TARGET_PATH, scheme $XCODE_SCHEME"
-
-          xcodebuild build \
-            $BUILD_TARGET_FLAG "$BUILD_TARGET_PATH" \
-            -scheme "$XCODE_SCHEME" \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath "$CM_BUILD_DIR/build/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty
-
-      - name: Zip .app for Appetize
+      # ---------------------------------------------------------
+      # 2. Find the iOS project/workspace
+      # ---------------------------------------------------------
+      - name: Detect Xcode project
         script: |
           set -e
-          cd "$CM_BUILD_DIR/build/DerivedData/Build/Products/Debug-iphonesimulator"
-          APP_PATH=$(find . -maxdepth 1 -name "*.app" | head -n 1)
-          if [ -z "$APP_PATH" ]; then
-            echo "No .app found in Debug-iphonesimulator products dir"
+
+          cd "$CM_BUILD_DIR"
+
+          PROJECT=$(find . -maxdepth 4 -name "iosApp.xcodeproj" -print -quit)
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: iosApp.xcodeproj was not found."
+            echo ""
+            echo "Available Xcode projects:"
+            find . -name "*.xcodeproj" -print
             exit 1
           fi
-          zip -r -X "$CM_BUILD_DIR/$APP_NAME.zip" "$APP_PATH"
 
-      - name: Upload build to Appetize
+          PROJECT="${PROJECT#./}"
+
+          echo "Found Xcode project:"
+          echo "$PROJECT"
+
+          echo "export IOS_PROJECT=$PROJECT" >> "$CM_ENV"
+
+      # ---------------------------------------------------------
+      # 3. Detect workspace if one exists
+      # ---------------------------------------------------------
+      - name: Detect Xcode workspace
         script: |
           set -e
-          RESPONSE=$(curl -s "https://api.appetize.io/v1/apps" \
-            -F "file=@$CM_BUILD_DIR/$APP_NAME.zip" \
-            -F "platform=ios" \
-            -u "${APPETIZE_API_TOKEN}:")
-          echo "Appetize response: $RESPONSE"
+
+          cd "$CM_BUILD_DIR"
+
+          WORKSPACE=$(find iosApp -maxdepth 2 -name "*.xcworkspace" -print -quit || true)
+
+          if [ -n "$WORKSPACE" ]; then
+            WORKSPACE="${WORKSPACE#./}"
+            echo "Found workspace:"
+            echo "$WORKSPACE"
+
+            echo "export IOS_WORKSPACE=$WORKSPACE" >> "$CM_ENV"
+          else
+            echo "No .xcworkspace found."
+            echo "Build will use iosApp.xcodeproj."
+          fi
+
+      # ---------------------------------------------------------
+      # 4. List projects, targets and schemes
+      # ---------------------------------------------------------
+      - name: Inspect Xcode schemes
+        script: |
+          set -e
+
+          cd "$CM_BUILD_DIR"
+
+          echo ""
+          echo "=========================================="
+          echo "XCODE PROJECT INFORMATION"
+          echo "=========================================="
+
+          if [ -n "${IOS_WORKSPACE:-}" ]; then
+            echo "Using workspace: $IOS_WORKSPACE"
+            xcodebuild -workspace "$IOS_WORKSPACE" -list
+          else
+            echo "Using project: $IOS_PROJECT"
+            xcodebuild -project "$IOS_PROJECT" -list
+          fi
+
+      # ---------------------------------------------------------
+      # 5. Select an available scheme
+      # ---------------------------------------------------------
+      - name: Detect build scheme
+        script: |
+          set -e
+
+          cd "$CM_BUILD_DIR"
+
+          echo ""
+          echo "=========================================="
+          echo "DETECTING BUILD SCHEME"
+          echo "=========================================="
+
+          if [ -n "${IOS_WORKSPACE:-}" ]; then
+            LIST_OUTPUT=$(xcodebuild -workspace "$IOS_WORKSPACE" -list 2>&1)
+          else
+            LIST_OUTPUT=$(xcodebuild -project "$IOS_PROJECT" -list 2>&1)
+          fi
+
+          echo "$LIST_OUTPUT"
+
+          # -----------------------------------------------------
+          # Prefer KAP if it actually exists.
+          # -----------------------------------------------------
+          if echo "$LIST_OUTPUT" | grep -qE '^[[:space:]]*KAP[[:space:]]*$'; then
+            SCHEME="KAP"
+            echo "Found requested scheme: KAP"
+
+          # -----------------------------------------------------
+          # Otherwise prefer iosApp.
+          # -----------------------------------------------------
+          elif echo "$LIST_OUTPUT" | grep -qE '^[[:space:]]*iosApp[[:space:]]*$'; then
+            SCHEME="iosApp"
+            echo "Found scheme: iosApp"
+
+          else
+            # ---------------------------------------------------
+            # Extract schemes from the "Schemes:" section.
+            # ---------------------------------------------------
+            SCHEME=$(echo "$LIST_OUTPUT" | \
+              awk '
+                /Schemes:/ { in_schemes=1; next }
+                in_schemes && NF {
+                  gsub(/^[ \t]+|[ \t]+$/, "", $0)
+                  print $0
+                }
+              ' | head -n 1)
+
+            if [ -z "$SCHEME" ]; then
+              echo ""
+              echo "ERROR: No Xcode scheme was found."
+              echo ""
+              echo "This means the project has no shared scheme available"
+              echo "to the Codemagic build environment."
+              echo ""
+              echo "You should open the project in Xcode and make the"
+              echo "scheme Shared, then commit the .xcscheme file."
+              exit 1
+            fi
+
+            echo "Automatically selected scheme: $SCHEME"
+          fi
+
+          echo ""
+          echo "FINAL SCHEME: $SCHEME"
+
+          echo "export IOS_SCHEME=$SCHEME" >> "$CM_ENV"
+
+      # ---------------------------------------------------------
+      # 6. Build iOS Simulator app
+      # ---------------------------------------------------------
+      - name: Build iOS app for simulator
+        script: |
+          set -e
+
+          cd "$CM_BUILD_DIR"
+
+          echo ""
+          echo "=========================================="
+          echo "BUILDING IOS SIMULATOR APP"
+          echo "=========================================="
+
+          echo "Project   : ${IOS_PROJECT:-none}"
+          echo "Workspace : ${IOS_WORKSPACE:-none}"
+          echo "Scheme    : $IOS_SCHEME"
+
+          DERIVED_DATA="$CM_BUILD_DIR/build/ios_simulator"
+
+          rm -rf "$DERIVED_DATA"
+          mkdir -p "$DERIVED_DATA"
+
+          if [ -n "${IOS_WORKSPACE:-}" ]; then
+
+            echo "Building using workspace..."
+
+            xcodebuild \
+              -workspace "$IOS_WORKSPACE" \
+              -scheme "$IOS_SCHEME" \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination 'generic/platform=iOS Simulator' \
+              -derivedDataPath "$DERIVED_DATA" \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              ONLY_ACTIVE_ARCH=NO \
+              build
+
+          else
+
+            echo "Building using project..."
+
+            xcodebuild \
+              -project "$IOS_PROJECT" \
+              -scheme "$IOS_SCHEME" \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination 'generic/platform=iOS Simulator' \
+              -derivedDataPath "$DERIVED_DATA" \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              ONLY_ACTIVE_ARCH=NO \
+              build
+
+          fi
+
+      # ---------------------------------------------------------
+      # 7. Locate generated .app
+      # ---------------------------------------------------------
+      - name: Verify simulator app
+        script: |
+          set -e
+
+          echo ""
+          echo "=========================================="
+          echo "GENERATED APPLICATION"
+          echo "=========================================="
+
+          find "$CM_BUILD_DIR/build/ios_simulator" \
+            -type d \
+            -name "*.app" \
+            -print
+
+          APP_COUNT=$(find "$CM_BUILD_DIR/build/ios_simulator" \
+            -type d \
+            -name "*.app" | wc -l | tr -d ' ')
+
+          if [ "$APP_COUNT" -eq 0 ]; then
+            echo ""
+            echo "ERROR: No .app was generated."
+            exit 1
+          fi
+
+          echo ""
+          echo "SUCCESS: $APP_COUNT .app file(s) generated."
 
     artifacts:
-      - "$CM_BUILD_DIR/*.zip"
-      - build/DerivedData/Build/Products/Debug-iphonesimulator/*.app
-
-    publishing:
-      email:
-        recipients:
-          - your-email@example.com   # change to your email
-        notify:
-          success: true
-          failure: true
+      - build/ios_simulator/**/*.app
+      - build/ios_simulator/**/*.dSYM
+      - /tmp/xcodebuild_logs/*.log
 
 
